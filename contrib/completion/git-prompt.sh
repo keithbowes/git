@@ -126,35 +126,10 @@ __git_ps1_show_upstream ()
 	local svn_remote svn_url_pattern count n
 	local upstream=git legacy="" verbose="" name=""
 
-	# Check whether arrays are supported (some shells support one style but
-	# not the other, so we should check for both).
-	(eval 'svn_remote=();svn_remote[0]=' 2>/dev/null) && __git_supports_arrays=yes || set --
 	# get some config options from git-config
 	local output="$(git config -z --get-regexp '^(svn-remote\..*\.url|bash\.showupstream)$' 2>/dev/null | tr '\0\n' '\n ')"
 	# Here strings cause syntax errors in some shells. The variable is global so that it only has be tested once.
-	[ -z "$__git_supports_here_strings" ] && (eval 'read -r key value <<< "$output"' 2>/dev/null) && __git_supports_here_strings=yes || __git_supports_here_strings=no
-	if [ $__git_supports_here_strings = yes ];
-	then
-eval '
-		svn_remote=()
-		while read -r key value; do
-			case "$key" in
-			bash.showupstream)
-				GIT_PS1_SHOWUPSTREAM="$value"
-				if [[ -z "${GIT_PS1_SHOWUPSTREAM}" ]]; then
-					p=""
-					return
-				fi
-				;;
-			svn-remote.*.url)
-				[ $__git_supports_arrays = yes ] && svn_remote[$((${#svn_remote[@]} + 1))]="$value" || set $@ "$value"
-				svn_url_pattern="$svn_url_pattern\\|$value"
-				upstream=svn+git # default upstream is SVN if available, else git
-				;;
-			esac
-		done <<< "$output"
-'
-	elif [ -n "$output" ];
+	if [ -n "$output" ];
 	then
 		local output_file="$(git rev-parse --git-dir)/svnremotesinfo"
 		[ -p "$output_file" ] || mkfifo "$output_file" 2>/dev/null
@@ -192,56 +167,28 @@ eval '
 	case "$upstream" in
 	git)    upstream="@{upstream}" ;;
 	svn*)
-		if [ "$__git_supports_arrays" = yes ];
-		then
-			# get the upstream from the "git-svn-id: ..." in a commit message
-			# (git-svn uses essentially the same procedure internally)
-			local -a svn_upstream
-			eval 'svn_upstream=($(git log --first-parent -1 \
-				--grep="^git-svn-id: \(${svn_url_pattern#??}\)" 2>/dev/null))'
-			if [ 0 -ne ${#svn_upstream[@]} ]; then
-				svn_upstream=${svn_upstream[${#svn_upstream[@]} - 2]}
-				svn_upstream=${svn_upstream%@*}
-				local n_stop="${#svn_remote[@]}"
-				n=1
-				while [ $n -lt $n_stop ]; do
-					svn_upstream=${svn_upstream#${svn_remote[$n]}}
-					n=$(($n + 1))
-				done
+		# get the upstream from the "git-svn-id: ..." in a commit message
+		# (git-svn uses essentially the same procedure internally)
+		local svn_remotes=$#
+		set $@ $(git log --first-parent -1 \
+			--grep="^git-svn-id: \(${svn_url_pattern#??}\)" 2>/dev/null)
+		if [ $svn_remotes -ne $# ]; then
+			eval 'svn_upstream=$'$(($# - 2))
+			local svn_upstream=${svn_upstream%@*}
+			n=1
+			while [ $n -lt $svn_remotes ]; do
+				eval 'svn_upstream=${svn_upstream#$'$n'}'
+				n=$(($n + 1))
+			done
 
-				if [ -z "$svn_upstream" ]; then
-					# default branch name for checkouts with no layout:
-					upstream=${GIT_SVN_ID:-git-svn}
-				else
-					upstream=${svn_upstream#/}
-				fi
-			elif [ "svn+git" = "$upstream" ]; then
-				upstream="@{upstream}"
+			if [ -z "$svn_upstream" ]; then
+				# default branch name for checkouts with no layout:
+				upstream=${GIT_SVN_ID:-git-svn}
+			else
+				upstream=${svn_upstream#/}
 			fi
-		else
-			# get the upstream from the "git-svn-id: ..." in a commit message
-			# (git-svn uses essentially the same procedure internally)
-			local svn_remotes=$#
-			set $@ $(git log --first-parent -1 \
-				--grep="^git-svn-id: \(${svn_url_pattern#??}\)" 2>/dev/null)
-			if [ $svn_remotes -ne $# ]; then
-				eval 'svn_upstream=$'$(($# - 2))
-				local svn_upstream=${svn_upstream%@*}
-				n=1
-				while [ $n -lt $svn_remotes ]; do
-					eval 'svn_upstream=${svn_upstream#$'$n'}'
-					n=$(($n + 1))
-				done
-
-				if [ -z "$svn_upstream" ]; then
-					# default branch name for checkouts with no layout:
-					upstream=${GIT_SVN_ID:-git-svn}
-				else
-					upstream=${svn_upstream#/}
-				fi
-			elif [ "svn+git" = "$upstream" ]; then
-				upstream="@{upstream}"
-			fi
+		elif [ "svn+git" = "$upstream" ]; then
+			upstream="@{upstream}"
 		fi
 		;;
 	esac
@@ -322,14 +269,15 @@ __git_ps1_colorize_gitstring ()
 		local c_green='%F{green}'
 		local c_lblue='%F{blue}'
 		local c_clear='%f'
-	elif [ -n "${BASH_VERSION-}" ]; then
+	elif [ -n "${BASH_VERSION-}" ] && [ $pcmode = yes ]; then
 		# Using \[ and \] around colors is necessary to prevent
 		# issues with command line editing/browsing/completion!
 		local c_red='\[\e[31m\]'
 		local c_green='\[\e[32m\]'
 		local c_lblue='\[\e[1;34m\]'
 		local c_clear='\[\e[0m\]'
-	else
+	elif type tput >/dev/null 2>&1;
+	then
 		if tput sgr0 2>/dev/null;
 		then
 			# Modern tput implementations using terminfo.
@@ -487,20 +435,20 @@ __git_ps1 ()
 	[ -z "${ZSH_VERSION-}" ] || eval '[[ -o PROMPT_SUBST ]]' || ps1_expanded=no
 	[ -z "${BASH_VERSION-}" ] || shopt -q promptvars || ps1_expanded=no
 
-	local repo_info rev_parse_exit_code
-	repo_info="$(git rev-parse --git-dir --is-inside-git-dir \
-		--is-bare-repository --is-inside-work-tree \
-		--short HEAD 2>/dev/null)"
-	rev_parse_exit_code="$?"
-
-	if [ -z "$repo_info" ]; then
-		return $exit
-	fi
 
 	local short_sha="" inside_worktree bare_repo inside_gitdir g
 	# For shells that support $'\n'
 	if [ $'' != '$' ];
 	then
+		local repo_info rev_parse_exit_code
+		repo_info="$(git rev-parse --git-dir --is-inside-git-dir \
+			--is-bare-repository --is-inside-work-tree \
+			--short HEAD 2>/dev/null)"
+		rev_parse_exit_code="$?"
+
+		if [ -z "$repo_info" ]; then
+			return $exit
+		fi
 		if [ "$rev_parse_exit_code" = "0" ]; then
 			short_sha="${repo_info##*$'\n'}"
 			repo_info="${repo_info%$'\n'*}"
@@ -513,19 +461,15 @@ __git_ps1 ()
 		g="${repo_info%$'\n'*}"
 	# For shells that don't
 	else
-		set $repo_info
-		g="$1"
-		# Handle gitdirs with spaces
-		while [ $# -gt 5 ];
-		do
-			shift
-			g="$g $1"
-		done
-		inside_gitdir="$2"
-		bare_repo="$3"
-		inside_worktree="$4"
-		short_sha="$5"
-		set --
+		g="$(git rev-parse --git-dir 2>/dev/null)"
+		if test -z "$g"; then
+			retun $exit
+		fi
+
+		inside_gitdir="$(git rev-parse --is-indide-git-dir)"
+		bare_repo="$(git rev-parse --is-bare-repository)"
+		inside_worktree="$(git rev-parse --is-inside-work-tree)"
+		short_sha="$(git rev-parse --short HEAD)"
 	fi
 
 	if [ "true" = "$inside_worktree" ] &&
@@ -662,9 +606,7 @@ __git_ps1 ()
 
 	# NO color option in Bash unless in PROMPT_COMMAND
 	if [ -n "${GIT_PS1_SHOWCOLORHINTS-}" ]; then
-		if [ $pcmode = yes ] || [ -z "${BASH_VERSION-}" ]; then
-			__git_ps1_colorize_gitstring
-		fi
+		__git_ps1_colorize_gitstring
 	fi
 
 	b=${b##refs/heads/}
