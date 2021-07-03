@@ -119,7 +119,6 @@ __git_ps1_show_upstream ()
 
 	# get some config options from git-config
 	output="$(git config -z --get-regexp '^(svn-remote\..*\.url|bash\.showupstream)$' 2>/dev/null | tr '\0\n' '\n ')"
-	# Here strings cause syntax errors in some shells. The variable is global so that it only has be tested once.
 	if [ -n "$output" ];
 	then
 		output_file="$(git rev-parse --git-dir)/svnremotesinfo"
