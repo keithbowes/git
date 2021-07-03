@@ -142,7 +142,7 @@ __git_ps1_show_upstream ()
 			esac
 		done < "$output_file"
 		unset key value
-		unset output output_file:w
+		unset output output_file
 	fi
 
 	# parse configuration values
