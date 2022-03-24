@@ -44,6 +44,9 @@ advice.*::
 		Shown when linkgit:git-push[1] rejects a forced update of
 		a branch when its remote-tracking ref has updates that we
 		do not have locally.
+	skippedCherryPicks::
+		Shown when linkgit:git-rebase[1] skips a commit that has already
+		been cherry-picked onto the upstream branch.
 	statusAheadBehind::
 		Shown when linkgit:git-status[1] computes the ahead/behind
 		counts for a local ref compared to its remote tracking ref,
@@ -82,6 +85,9 @@ advice.*::
 		linkgit:git-switch[1] or linkgit:git-checkout[1]
 		to move to the detach HEAD state, to instruct how to
 		create a local branch after the fact.
+	suggestDetachingHead::
+		Advice shown when linkgit:git-switch[1] refuses to detach HEAD
+		without the explicit `--detach` option.
 	checkoutAmbiguousRemoteBranchName::
 		Advice shown when the argument to
 		linkgit:git-checkout[1] and linkgit:git-switch[1]
@@ -113,6 +119,9 @@ advice.*::
 	submoduleAlternateErrorStrategyDie::
 		Advice shown when a submodule.alternateErrorStrategy option
 		configured to "die" causes a fatal error.
+	submodulesNotUpdated::
+		Advice shown when a user runs a submodule command that fails
+		because `git submodule update --init` was not run.
 	addIgnoredFile::
 		Advice shown if a user attempts to add an ignored file to
 		the index.

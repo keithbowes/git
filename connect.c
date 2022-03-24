@@ -164,6 +164,8 @@ enum protocol_version discover_version(struct packet_reader *reader)
 		BUG("unknown protocol version");
 	}
 
+	trace2_data_intmax("transfer", NULL, "negotiated-version", version);
+
 	return version;
 }
 
@@ -377,7 +379,7 @@ struct ref **get_remote_heads(struct packet_reader *reader,
 
 /* Returns 1 when a valid ref has been added to `list`, 0 otherwise */
 static int process_ref_v2(struct packet_reader *reader, struct ref ***list,
-			  char **unborn_head_target)
+			  const char **unborn_head_target)
 {
 	int ret = 1;
 	int i = 0;
@@ -481,7 +483,7 @@ struct ref **get_remote_refs(int fd_out, struct packet_reader *reader,
 	const char *hash_name;
 	struct strvec *ref_prefixes = transport_options ?
 		&transport_options->ref_prefixes : NULL;
-	char **unborn_head_target = transport_options ?
+	const char **unborn_head_target = transport_options ?
 		&transport_options->unborn_head_target : NULL;
 	*list = NULL;
 
@@ -555,6 +557,8 @@ const char *parse_feature_value(const char *feature_list, const char *feature, i
 			if (!*value || isspace(*value)) {
 				if (lenp)
 					*lenp = 0;
+				if (offset)
+					*offset = found + len - feature_list;
 				return value;
 			}
 			/* feature with a value (e.g., "agent=git/1.2.3") */

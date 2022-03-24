@@ -134,7 +134,7 @@ test_expect_success '"list" all worktrees with prunable consistent with "prune"'
 	git worktree list >out &&
 	grep "/prunable  *[0-9a-f].* prunable$" out &&
 	! grep "/unprunable  *[0-9a-f].* unprunable$" out &&
-	git worktree prune --verbose >out &&
+	git worktree prune --verbose 2>out &&
 	test_i18ngrep "^Removing worktrees/prunable" out &&
 	test_i18ngrep ! "^Removing worktrees/unprunable" out
 '
@@ -230,7 +230,7 @@ test_expect_success 'broken main worktree still at the top' '
 		EOF
 		cd linked &&
 		echo "worktree $(pwd)" >expected &&
-		echo "ref: .broken" >../.git/HEAD &&
+		(cd ../ && test-tool ref-store main create-symref HEAD .broken ) &&
 		git worktree list --porcelain >out &&
 		head -n 3 out >actual &&
 		test_cmp ../expected actual &&

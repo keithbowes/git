@@ -159,24 +159,6 @@ int add_unseen_recent_objects_to_traversal(struct rev_info *revs,
 				      FOR_EACH_OBJECT_LOCAL_ONLY);
 }
 
-static void *lookup_object_by_type(struct repository *r,
-				   const struct object_id *oid,
-				   enum object_type type)
-{
-	switch (type) {
-	case OBJ_COMMIT:
-		return lookup_commit(r, oid);
-	case OBJ_TREE:
-		return lookup_tree(r, oid);
-	case OBJ_TAG:
-		return lookup_tag(r, oid);
-	case OBJ_BLOB:
-		return lookup_blob(r, oid);
-	default:
-		die("BUG: unknown object type %d", type);
-	}
-}
-
 static int mark_object_seen(const struct object_id *oid,
 			     enum object_type type,
 			     int exclude,
@@ -223,7 +205,7 @@ void mark_reachable_objects(struct rev_info *revs, int mark_reflog,
 	cp.progress = progress;
 	cp.count = 0;
 
-	bitmap_git = prepare_bitmap_walk(revs, NULL, 0);
+	bitmap_git = prepare_bitmap_walk(revs, 0);
 	if (bitmap_git) {
 		traverse_bitmap_commit_list(bitmap_git, revs, mark_object_seen);
 		free_bitmap_index(bitmap_git);

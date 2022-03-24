@@ -5,9 +5,6 @@ test_description='Per branch config variables affects "git fetch".
 
 '
 
-GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
-export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
-
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-bundle.sh
 
@@ -40,11 +37,11 @@ test_expect_success "clone and setup child repos" '
 		git config branch.main.remote two &&
 		git config branch.main.merge refs/heads/one &&
 		mkdir -p .git/remotes &&
-		{
-			echo "URL: ../two/.git/"
-			echo "Pull: refs/heads/main:refs/heads/two"
-			echo "Pull: refs/heads/one:refs/heads/one"
-		} >.git/remotes/two
+		cat >.git/remotes/two <<-\EOF
+		URL: ../two/.git/
+		Pull: refs/heads/main:refs/heads/two
+		Pull: refs/heads/one:refs/heads/one
+		EOF
 	) &&
 	git clone . bundle &&
 	git clone . seven
@@ -71,7 +68,7 @@ test_expect_success "fetch test for-merge" '
 	main_in_two=$(cd ../two && git rev-parse main) &&
 	one_in_two=$(cd ../two && git rev-parse one) &&
 	{
-		echo "$one_in_two	"
+		echo "$one_in_two	" &&
 		echo "$main_in_two	not-for-merge"
 	} >expected &&
 	cut -f -2 .git/FETCH_HEAD >actual &&
@@ -165,6 +162,17 @@ test_expect_success 'fetch --prune --tags with refspec prunes based on refspec' 
 	test_must_fail git rev-parse refs/remotes/origin/foo/otherbranch &&
 	git rev-parse origin/extrabranch &&
 	git rev-parse sometag
+'
+
+test_expect_success REFFILES 'fetch --prune fails to delete branches' '
+	cd "$D" &&
+	git clone . prune-fail &&
+	cd prune-fail &&
+	git update-ref refs/remotes/origin/extrabranch main &&
+	: this will prevent --prune from locking packed-refs for deleting refs, but adding loose refs still succeeds  &&
+	>.git/packed-refs.new &&
+
+	test_must_fail git fetch --prune origin
 '
 
 test_expect_success 'fetch --atomic works with a single branch' '
@@ -333,6 +341,35 @@ test_expect_success 'fetch --atomic --append appends to FETCH_HEAD' '
 	git branch atomic-fetch-head-3 &&
 	test_must_fail git -C atomic fetch --atomic --append origin atomic-fetch-head-3 &&
 	test_cmp expected atomic/.git/FETCH_HEAD
+'
+
+test_expect_success 'fetch --atomic --prune executes a single reference transaction only' '
+	test_when_finished "rm -rf \"$D\"/atomic" &&
+
+	cd "$D" &&
+	git branch scheduled-for-deletion &&
+	git clone . atomic &&
+	git branch -D scheduled-for-deletion &&
+	git branch new-branch &&
+	head_oid=$(git rev-parse HEAD) &&
+
+	# Fetching with the `--atomic` flag should update all references in a
+	# single transaction.
+	cat >expected <<-EOF &&
+		prepared
+		$ZERO_OID $ZERO_OID refs/remotes/origin/scheduled-for-deletion
+		$ZERO_OID $head_oid refs/remotes/origin/new-branch
+		committed
+		$ZERO_OID $ZERO_OID refs/remotes/origin/scheduled-for-deletion
+		$ZERO_OID $head_oid refs/remotes/origin/new-branch
+	EOF
+
+	write_script atomic/.git/hooks/reference-transaction <<-\EOF &&
+		( echo "$*" && cat ) >>actual
+	EOF
+
+	git -C atomic fetch --atomic --prune origin &&
+	test_cmp expected atomic/actual
 '
 
 test_expect_success '--refmap="" ignores configured refspec' '
@@ -550,7 +587,7 @@ test_expect_success 'bundle should record HEAD correctly' '
 	git bundle list-heads bundle5 >actual &&
 	for h in HEAD refs/heads/main
 	do
-		echo "$(git rev-parse --verify $h) $h"
+		echo "$(git rev-parse --verify $h) $h" || return 1
 	done >expect &&
 	test_cmp expect actual
 
@@ -1212,6 +1249,19 @@ test_expect_success '--negotiation-tip understands abbreviated SHA-1' '
 		--negotiation-tip=$(git -C client rev-parse --short beta_1) \
 		origin alpha_s beta_s &&
 	check_negotiation_tip
+'
+
+test_expect_success '--negotiation-tip rejects missing OIDs' '
+	setup_negotiation_tip server server 0 &&
+	test_must_fail git -C client fetch \
+		--negotiation-tip=alpha_1 \
+		--negotiation-tip=$(test_oid zero) \
+		origin alpha_s beta_s 2>err &&
+	cat >fatal-expect <<-EOF &&
+	fatal: the object $(test_oid zero) does not exist
+EOF
+	grep fatal: err >fatal-actual &&
+	test_cmp fatal-expect fatal-actual
 '
 
 . "$TEST_DIRECTORY"/lib-httpd.sh

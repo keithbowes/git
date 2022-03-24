@@ -20,7 +20,7 @@
 #include "packfile.h"
 
 static const char rev_list_usage[] =
-"git rev-list [OPTION] <commit-id>... [ -- paths... ]\n"
+"git rev-list [<options>] <commit-id>... [-- <path>...]\n"
 "  limiting output:\n"
 "    --max-count=<n>\n"
 "    --max-age=<epoch>\n"
@@ -62,7 +62,6 @@ static const char rev_list_usage[] =
 static struct progress *progress;
 static unsigned progress_counter;
 
-static struct list_objects_filter_options filter_options;
 static struct oidset omitted_objects;
 static int arg_print_omitted; /* print objects omitted by filter */
 
@@ -127,13 +126,15 @@ static void show_commit(struct commit *commit, void *data)
 	if (info->header_prefix)
 		fputs(info->header_prefix, stdout);
 
-	if (!revs->graph)
-		fputs(get_revision_mark(revs, commit), stdout);
-	if (revs->abbrev_commit && revs->abbrev)
-		fputs(find_unique_abbrev(&commit->object.oid, revs->abbrev),
-		      stdout);
-	else
-		fputs(oid_to_hex(&commit->object.oid), stdout);
+	if (revs->include_header) {
+		if (!revs->graph)
+			fputs(get_revision_mark(revs, commit), stdout);
+		if (revs->abbrev_commit && revs->abbrev)
+			fputs(find_unique_abbrev(&commit->object.oid, revs->abbrev),
+			      stdout);
+		else
+			fputs(oid_to_hex(&commit->object.oid), stdout);
+	}
 	if (revs->print_parents) {
 		struct commit_list *parents = commit->parents;
 		while (parents) {
@@ -153,7 +154,7 @@ static void show_commit(struct commit *commit, void *data)
 	show_decorations(revs, commit);
 	if (revs->commit_format == CMIT_FMT_ONELINE)
 		putchar(' ');
-	else
+	else if (revs->include_header)
 		putchar('\n');
 
 	if (revs->verbose_header) {
@@ -398,7 +399,6 @@ static inline int parse_missing_action_value(const char *value)
 }
 
 static int try_bitmap_count(struct rev_info *revs,
-			    struct list_objects_filter_options *filter,
 			    int filter_provided_objects)
 {
 	uint32_t commit_count = 0,
@@ -434,7 +434,7 @@ static int try_bitmap_count(struct rev_info *revs,
 	 */
 	max_count = revs->max_count;
 
-	bitmap_git = prepare_bitmap_walk(revs, filter, filter_provided_objects);
+	bitmap_git = prepare_bitmap_walk(revs, filter_provided_objects);
 	if (!bitmap_git)
 		return -1;
 
@@ -451,7 +451,6 @@ static int try_bitmap_count(struct rev_info *revs,
 }
 
 static int try_bitmap_traversal(struct rev_info *revs,
-				struct list_objects_filter_options *filter,
 				int filter_provided_objects)
 {
 	struct bitmap_index *bitmap_git;
@@ -463,7 +462,7 @@ static int try_bitmap_traversal(struct rev_info *revs,
 	if (revs->max_count >= 0)
 		return -1;
 
-	bitmap_git = prepare_bitmap_walk(revs, filter, filter_provided_objects);
+	bitmap_git = prepare_bitmap_walk(revs, filter_provided_objects);
 	if (!bitmap_git)
 		return -1;
 
@@ -473,7 +472,6 @@ static int try_bitmap_traversal(struct rev_info *revs,
 }
 
 static int try_bitmap_disk_usage(struct rev_info *revs,
-				 struct list_objects_filter_options *filter,
 				 int filter_provided_objects)
 {
 	struct bitmap_index *bitmap_git;
@@ -481,7 +479,7 @@ static int try_bitmap_disk_usage(struct rev_info *revs,
 	if (!show_disk_usage)
 		return -1;
 
-	bitmap_git = prepare_bitmap_walk(revs, filter, filter_provided_objects);
+	bitmap_git = prepare_bitmap_walk(revs, filter_provided_objects);
 	if (!bitmap_git)
 		return -1;
 
@@ -512,6 +510,7 @@ int cmd_rev_list(int argc, const char **argv, const char *prefix)
 	repo_init_revisions(the_repository, &revs, prefix);
 	revs.abbrev = DEFAULT_ABBREV;
 	revs.commit_format = CMIT_FMT_UNSPECIFIED;
+	revs.include_header = 1;
 
 	/*
 	 * Scan the argument list before invoking setup_revisions(), so that we
@@ -535,7 +534,7 @@ int cmd_rev_list(int argc, const char **argv, const char *prefix)
 		const char *arg = argv[i];
 		if (skip_prefix(arg, "--missing=", &arg)) {
 			if (revs.exclude_promisor_objects)
-				die(_("cannot combine --exclude-promisor-objects and --missing"));
+				die(_("options '%s' and '%s' cannot be used together"), "--exclude-promisor-objects", "--missing");
 			if (parse_missing_action_value(arg))
 				break;
 		}
@@ -592,17 +591,6 @@ int cmd_rev_list(int argc, const char **argv, const char *prefix)
 			show_progress = arg;
 			continue;
 		}
-
-		if (skip_prefix(arg, ("--" CL_ARG__FILTER "="), &arg)) {
-			parse_list_objects_filter(&filter_options, arg);
-			if (filter_options.choice && !revs.blob_objects)
-				die(_("object filtering requires --objects"));
-			continue;
-		}
-		if (!strcmp(arg, ("--no-" CL_ARG__FILTER))) {
-			list_objects_filter_set_no_filter(&filter_options);
-			continue;
-		}
 		if (!strcmp(arg, "--filter-provided-objects")) {
 			filter_provided_objects = 1;
 			continue;
@@ -627,6 +615,16 @@ int cmd_rev_list(int argc, const char **argv, const char *prefix)
 			continue;
 		}
 
+		if (!strcmp(arg, ("--commit-header"))) {
+			revs.include_header = 1;
+			continue;
+		}
+
+		if (!strcmp(arg, ("--no-commit-header"))) {
+			revs.include_header = 0;
+			continue;
+		}
+
 		if (!strcmp(arg, "--disk-usage")) {
 			show_disk_usage = 1;
 			info.flags |= REV_LIST_QUIET;
@@ -636,10 +634,12 @@ int cmd_rev_list(int argc, const char **argv, const char *prefix)
 		usage(rev_list_usage);
 
 	}
+	if (revs.commit_format != CMIT_FMT_USERFORMAT)
+		revs.include_header = 1;
 	if (revs.commit_format != CMIT_FMT_UNSPECIFIED) {
 		/* The command line has a --pretty  */
 		info.hdr_termination = '\n';
-		if (revs.commit_format == CMIT_FMT_ONELINE)
+		if (revs.commit_format == CMIT_FMT_ONELINE || !revs.include_header)
 			info.header_prefix = "";
 		else
 			info.header_prefix = "commit ";
@@ -661,7 +661,7 @@ int cmd_rev_list(int argc, const char **argv, const char *prefix)
 	if (revs.count &&
 	    (revs.tag_objects || revs.tree_objects || revs.blob_objects) &&
 	    (revs.left_right || revs.cherry_mark))
-		die(_("marked counting is incompatible with --objects"));
+		die(_("marked counting and '%s' cannot be used together"), "--objects");
 
 	save_commit_buffer = (revs.verbose_header ||
 			      revs.grep_filter.pattern_list ||
@@ -673,11 +673,11 @@ int cmd_rev_list(int argc, const char **argv, const char *prefix)
 		progress = start_delayed_progress(show_progress, 0);
 
 	if (use_bitmap_index) {
-		if (!try_bitmap_count(&revs, &filter_options, filter_provided_objects))
+		if (!try_bitmap_count(&revs, filter_provided_objects))
 			return 0;
-		if (!try_bitmap_disk_usage(&revs, &filter_options, filter_provided_objects))
+		if (!try_bitmap_disk_usage(&revs, filter_provided_objects))
 			return 0;
-		if (!try_bitmap_traversal(&revs, &filter_options, filter_provided_objects))
+		if (!try_bitmap_traversal(&revs, filter_provided_objects))
 			return 0;
 	}
 
@@ -718,7 +718,7 @@ int cmd_rev_list(int argc, const char **argv, const char *prefix)
 		oidset_init(&missing_objects, DEFAULT_OIDSET_SIZE);
 
 	traverse_commit_list_filtered(
-		&filter_options, &revs, show_commit, show_object, &info,
+		&revs, show_commit, show_object, &info,
 		(arg_print_omitted ? &omitted_objects : NULL));
 
 	if (arg_print_omitted) {

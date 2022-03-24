@@ -201,6 +201,7 @@ test_expect_success 'push with negotiation' '
 	# Without negotiation
 	mk_empty testrepo &&
 	git push testrepo $the_first_commit:refs/remotes/origin/first_commit &&
+	test_commit -C testrepo unrelated_commit &&
 	git -C testrepo config receive.hideRefs refs/remotes/origin/first_commit &&
 	echo now pushing without negotiation &&
 	GIT_TRACE2_EVENT="$(pwd)/event" git -c protocol.version=2 push testrepo refs/heads/main:refs/remotes/origin/main &&
@@ -210,6 +211,7 @@ test_expect_success 'push with negotiation' '
 	rm event &&
 	mk_empty testrepo &&
 	git push testrepo $the_first_commit:refs/remotes/origin/first_commit &&
+	test_commit -C testrepo unrelated_commit &&
 	git -C testrepo config receive.hideRefs refs/remotes/origin/first_commit &&
 	GIT_TRACE2_EVENT="$(pwd)/event" git -c protocol.version=2 -c push.negotiate=1 push testrepo refs/heads/main:refs/remotes/origin/main &&
 	grep_wrote 2 event # 1 commit, 1 tree
@@ -219,11 +221,24 @@ test_expect_success 'push with negotiation proceeds anyway even if negotiation f
 	rm event &&
 	mk_empty testrepo &&
 	git push testrepo $the_first_commit:refs/remotes/origin/first_commit &&
+	test_commit -C testrepo unrelated_commit &&
 	git -C testrepo config receive.hideRefs refs/remotes/origin/first_commit &&
 	GIT_TEST_PROTOCOL_VERSION=0 GIT_TRACE2_EVENT="$(pwd)/event" \
 		git -c push.negotiate=1 push testrepo refs/heads/main:refs/remotes/origin/main 2>err &&
 	grep_wrote 5 event && # 2 commits, 2 trees, 1 blob
 	test_i18ngrep "push negotiation failed" err
+'
+
+test_expect_success 'push with negotiation does not attempt to fetch submodules' '
+	mk_empty submodule_upstream &&
+	test_commit -C submodule_upstream submodule_commit &&
+	git submodule add ./submodule_upstream submodule &&
+	mk_empty testrepo &&
+	git push testrepo $the_first_commit:refs/remotes/origin/first_commit &&
+	test_commit -C testrepo unrelated_commit &&
+	git -C testrepo config receive.hideRefs refs/remotes/origin/first_commit &&
+	git -c submodule.recurse=true -c protocol.version=2 -c push.negotiate=1 push testrepo refs/heads/main:refs/remotes/origin/main 2>err &&
+	! grep "Fetching submodule" err
 '
 
 test_expect_success 'push without wildcard' '
@@ -538,6 +553,15 @@ do
 
 done
 
+test_expect_success "push to remote with no explicit refspec and config remote.*.push = src:dest" '
+	mk_test testrepo heads/main &&
+	git checkout $the_first_commit &&
+	test_config remote.there.url testrepo &&
+	test_config remote.there.push refs/heads/main:refs/heads/main &&
+	git push there &&
+	check_push_result testrepo $the_commit heads/main
+'
+
 test_expect_success 'push with remote.pushdefault' '
 	mk_test up_repo heads/main &&
 	mk_test down_repo heads/main &&
@@ -659,10 +683,10 @@ test_expect_success 'push does not update local refs on failure' '
 
 test_expect_success 'allow deleting an invalid remote ref' '
 
-	mk_test testrepo heads/main &&
+	mk_test testrepo heads/branch &&
 	rm -f testrepo/.git/objects/??/* &&
-	git push testrepo :refs/heads/main &&
-	(cd testrepo && test_must_fail git rev-parse --verify refs/heads/main)
+	git push testrepo :refs/heads/branch &&
+	(cd testrepo && test_must_fail git rev-parse --verify refs/heads/branch)
 
 '
 
@@ -703,25 +727,26 @@ test_expect_success 'pushing valid refs triggers post-receive and post-update ho
 '
 
 test_expect_success 'deleting dangling ref triggers hooks with correct args' '
-	mk_test_with_hooks testrepo heads/main &&
+	mk_test_with_hooks testrepo heads/branch &&
+	orig=$(git -C testrepo rev-parse refs/heads/branch) &&
 	rm -f testrepo/.git/objects/??/* &&
-	git push testrepo :refs/heads/main &&
+	git push testrepo :refs/heads/branch &&
 	(
 		cd testrepo/.git &&
 		cat >pre-receive.expect <<-EOF &&
-		$ZERO_OID $ZERO_OID refs/heads/main
+		$orig $ZERO_OID refs/heads/branch
 		EOF
 
 		cat >update.expect <<-EOF &&
-		refs/heads/main $ZERO_OID $ZERO_OID
+		refs/heads/branch $orig $ZERO_OID
 		EOF
 
 		cat >post-receive.expect <<-EOF &&
-		$ZERO_OID $ZERO_OID refs/heads/main
+		$orig $ZERO_OID refs/heads/branch
 		EOF
 
 		cat >post-update.expect <<-EOF &&
-		refs/heads/main
+		refs/heads/branch
 		EOF
 
 		test_cmp pre-receive.expect pre-receive.actual &&
@@ -1312,10 +1337,7 @@ test_expect_success 'fetch follows tags by default' '
 		git pull ../testrepo main &&
 		git tag -m "annotated" tag &&
 		git for-each-ref >tmp1 &&
-		(
-			cat tmp1
-			sed -n "s|refs/heads/main$|refs/remotes/origin/main|p" tmp1
-		) |
+		sed -n "p; s|refs/heads/main$|refs/remotes/origin/main|p" tmp1 |
 		sort -k 3 >../expect
 	) &&
 	git init dst &&
@@ -1765,7 +1787,46 @@ test_expect_success 'denyCurrentBranch and worktrees' '
 	test_must_fail git -C cloned push origin HEAD:new-wt &&
 	test_config receive.denyCurrentBranch updateInstead &&
 	git -C cloned push origin HEAD:new-wt &&
+	test_path_exists new-wt/first.t &&
 	test_must_fail git -C cloned push --delete origin new-wt
+'
+
+test_expect_success 'denyCurrentBranch and bare repository worktrees' '
+	test_when_finished "rm -fr bare.git" &&
+	git clone --bare . bare.git &&
+	git -C bare.git worktree add wt &&
+	test_commit grape &&
+	git -C bare.git config receive.denyCurrentBranch refuse &&
+	test_must_fail git push bare.git HEAD:wt &&
+	git -C bare.git config receive.denyCurrentBranch updateInstead &&
+	git push bare.git HEAD:wt &&
+	test_path_exists bare.git/wt/grape.t &&
+	test_must_fail git push --delete bare.git wt
+'
+
+test_expect_success 'refuse fetch to current branch of worktree' '
+	test_when_finished "git worktree remove --force wt && git branch -D wt" &&
+	git worktree add wt &&
+	test_commit apple &&
+	test_must_fail git fetch . HEAD:wt &&
+	git fetch -u . HEAD:wt
+'
+
+test_expect_success 'refuse fetch to current branch of bare repository worktree' '
+	test_when_finished "rm -fr bare.git" &&
+	git clone --bare . bare.git &&
+	git -C bare.git worktree add wt &&
+	test_commit banana &&
+	test_must_fail git -C bare.git fetch .. HEAD:wt &&
+	git -C bare.git fetch -u .. HEAD:wt
+'
+
+test_expect_success 'refuse to push a hidden ref, and make sure do not pollute the repository' '
+	mk_empty testrepo &&
+	git -C testrepo config receive.hiderefs refs/hidden &&
+	git -C testrepo config receive.unpackLimit 1 &&
+	test_must_fail git push testrepo HEAD:refs/hidden/foo &&
+	test_dir_is_empty testrepo/.git/objects/pack
 '
 
 test_done

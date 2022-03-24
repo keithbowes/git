@@ -406,4 +406,35 @@ test_expect_success 'refuse to switch to branch checked out elsewhere' '
 	test_i18ngrep "already checked out" err
 '
 
+test_expect_success MINGW,SYMLINKS_WINDOWS 'rebase when .git/logs is a symlink' '
+	git checkout main &&
+	mv .git/logs actual_logs &&
+	cmd //c "mklink /D .git\logs ..\actual_logs" &&
+	git rebase -f HEAD^ &&
+	test -L .git/logs &&
+	rm .git/logs &&
+	mv actual_logs .git/logs
+'
+
+test_expect_success 'rebase when inside worktree subdirectory' '
+	git init main-wt &&
+	(
+		cd main-wt &&
+		git commit --allow-empty -m "initial" &&
+		mkdir -p foo/bar &&
+		test_commit foo/bar/baz &&
+		mkdir -p a/b &&
+		test_commit a/b/c &&
+		# create another branch for our other worktree
+		git branch other &&
+		git worktree add ../other-wt other &&
+		cd ../other-wt &&
+		# create and cd into a subdirectory
+		mkdir -p random/dir &&
+		cd random/dir &&
+		# now do the rebase
+		git rebase --onto HEAD^^ HEAD^  # drops the HEAD^ commit
+	)
+'
+
 test_done

@@ -8,12 +8,10 @@
 
 #if defined(HAVE_DEV_TTY) || defined(GIT_WINDOWS_NATIVE)
 
-static void restore_term(void);
-
 static void restore_term_on_signal(int sig)
 {
 	restore_term();
-	sigchain_pop(sig);
+	/* restore_term calls sigchain_pop_common */
 	raise(sig);
 }
 
@@ -25,7 +23,7 @@ static void restore_term_on_signal(int sig)
 static int term_fd = -1;
 static struct termios old_term;
 
-static void restore_term(void)
+void restore_term(void)
 {
 	if (term_fd < 0)
 		return;
@@ -33,23 +31,40 @@ static void restore_term(void)
 	tcsetattr(term_fd, TCSAFLUSH, &old_term);
 	close(term_fd);
 	term_fd = -1;
+	sigchain_pop_common();
+}
+
+int save_term(int full_duplex)
+{
+	if (term_fd < 0)
+		term_fd = open("/dev/tty", O_RDWR);
+	if (term_fd < 0)
+		return -1;
+	if (tcgetattr(term_fd, &old_term) < 0)
+		return -1;
+	sigchain_push_common(restore_term_on_signal);
+
+	return 0;
 }
 
 static int disable_bits(tcflag_t bits)
 {
 	struct termios t;
 
-	term_fd = open("/dev/tty", O_RDWR);
-	if (tcgetattr(term_fd, &t) < 0)
+	if (save_term(0) < 0)
 		goto error;
 
-	old_term = t;
-	sigchain_push_common(restore_term_on_signal);
+	t = old_term;
 
 	t.c_lflag &= ~bits;
+	if (bits & ICANON) {
+		t.c_cc[VMIN] = 1;
+		t.c_cc[VTIME] = 0;
+	}
 	if (!tcsetattr(term_fd, TCSAFLUSH, &t))
 		return 0;
 
+	sigchain_pop_common();
 error:
 	close(term_fd);
 	term_fd = -1;
@@ -75,9 +90,10 @@ static int enable_non_canonical(void)
 static int use_stty = 1;
 static struct string_list stty_restore = STRING_LIST_INIT_DUP;
 static HANDLE hconin = INVALID_HANDLE_VALUE;
-static DWORD cmode;
+static HANDLE hconout = INVALID_HANDLE_VALUE;
+static DWORD cmode_in, cmode_out;
 
-static void restore_term(void)
+void restore_term(void)
 {
 	if (use_stty) {
 		int i;
@@ -94,12 +110,48 @@ static void restore_term(void)
 		return;
 	}
 
+	sigchain_pop_common();
+
 	if (hconin == INVALID_HANDLE_VALUE)
 		return;
 
-	SetConsoleMode(hconin, cmode);
+	SetConsoleMode(hconin, cmode_in);
+	CloseHandle(hconin);
+	if (cmode_out) {
+		assert(hconout != INVALID_HANDLE_VALUE);
+		SetConsoleMode(hconout, cmode_out);
+		CloseHandle(hconout);
+	}
+
+	hconin = hconout = INVALID_HANDLE_VALUE;
+}
+
+int save_term(int full_duplex)
+{
+	hconin = CreateFileA("CONIN$", GENERIC_READ | GENERIC_WRITE,
+	    FILE_SHARE_READ, NULL, OPEN_EXISTING,
+	    FILE_ATTRIBUTE_NORMAL, NULL);
+	if (hconin == INVALID_HANDLE_VALUE)
+		return -1;
+
+	if (full_duplex) {
+		hconout = CreateFileA("CONOUT$", GENERIC_READ | GENERIC_WRITE,
+			FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+			FILE_ATTRIBUTE_NORMAL, NULL);
+		if (hconout == INVALID_HANDLE_VALUE)
+			goto error;
+
+		GetConsoleMode(hconout, &cmode_out);
+	}
+
+	GetConsoleMode(hconin, &cmode_in);
+	use_stty = 0;
+	sigchain_push_common(restore_term_on_signal);
+	return 0;
+error:
 	CloseHandle(hconin);
 	hconin = INVALID_HANDLE_VALUE;
+	return -1;
 }
 
 static int disable_bits(DWORD bits)
@@ -111,7 +163,11 @@ static int disable_bits(DWORD bits)
 
 		if (bits & ENABLE_LINE_INPUT) {
 			string_list_append(&stty_restore, "icanon");
-			strvec_push(&cp.args, "-icanon");
+			/*
+			 * POSIX allows VMIN and VTIME to overlap with VEOF and
+			 * VEOL - let's hope that is not the case on windows.
+			 */
+			strvec_pushl(&cp.args, "-icanon", "min", "1", "time", "0", NULL);
 		}
 
 		if (bits & ENABLE_ECHO_INPUT) {
@@ -135,17 +191,13 @@ static int disable_bits(DWORD bits)
 		use_stty = 0;
 	}
 
-	hconin = CreateFile("CONIN$", GENERIC_READ | GENERIC_WRITE,
-	    FILE_SHARE_READ, NULL, OPEN_EXISTING,
-	    FILE_ATTRIBUTE_NORMAL, NULL);
-	if (hconin == INVALID_HANDLE_VALUE)
+	if (save_term(0) < 0)
 		return -1;
 
-	GetConsoleMode(hconin, &cmode);
-	sigchain_push_common(restore_term_on_signal);
-	if (!SetConsoleMode(hconin, cmode & ~bits)) {
+	if (!SetConsoleMode(hconin, cmode_in & ~bits)) {
 		CloseHandle(hconin);
 		hconin = INVALID_HANDLE_VALUE;
+		sigchain_pop_common();
 		return -1;
 	}
 
@@ -350,7 +402,7 @@ int read_key_without_echo(struct strbuf *buf)
 
 			ch = getchar();
 			if (ch == EOF)
-				return 0;
+				break;
 			strbuf_addch(buf, ch);
 		}
 	}
@@ -360,6 +412,16 @@ int read_key_without_echo(struct strbuf *buf)
 }
 
 #else
+
+int save_term(int full_duplex)
+{
+	/* full_duplex == 1, but no support available */
+	return -full_duplex;
+}
+
+void restore_term(void)
+{
+}
 
 char *git_terminal_prompt(const char *prompt, int echo)
 {

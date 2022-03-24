@@ -25,6 +25,7 @@
 #include "shallow.h"
 #include "commit-reach.h"
 #include "commit-graph.h"
+#include "sigchain.h"
 
 static int transfer_unpack_limit = -1;
 static int fetch_unpack_limit = -1;
@@ -119,6 +120,11 @@ static struct commit *deref_without_lazy_fetch(const struct object_id *oid,
 {
 	enum object_type type;
 	struct object_info info = { .typep = &type };
+	struct commit *commit;
+
+	commit = lookup_commit_in_graph(the_repository, oid);
+	if (commit)
+		return commit;
 
 	while (1) {
 		if (oid_object_info_extended(the_repository, oid, &info,
@@ -137,8 +143,14 @@ static struct commit *deref_without_lazy_fetch(const struct object_id *oid,
 			break;
 		}
 	}
-	if (type == OBJ_COMMIT)
-		return (struct commit *) parse_object(the_repository, oid);
+
+	if (type == OBJ_COMMIT) {
+		struct commit *commit = lookup_commit(the_repository, oid);
+		if (!commit || repo_parse_commit(the_repository, commit))
+			return NULL;
+		return commit;
+	}
+
 	return NULL;
 }
 
@@ -285,7 +297,7 @@ static int find_common(struct fetch_negotiator *negotiator,
 	struct packet_reader reader;
 
 	if (args->stateless_rpc && multi_ack == 1)
-		die(_("--stateless-rpc requires multi_ack_detailed"));
+		die(_("the option '%s' requires '%s'"), "--stateless-rpc", "multi_ack_detailed");
 
 	packet_reader_init(&reader, fd[0], NULL, 0,
 			   PACKET_READ_CHOMP_NEWLINE |
@@ -684,26 +696,30 @@ static void mark_complete_and_common_ref(struct fetch_negotiator *negotiator,
 
 	trace2_region_enter("fetch-pack", "parse_remote_refs_and_find_cutoff", NULL);
 	for (ref = *refs; ref; ref = ref->next) {
-		struct object *o;
+		struct commit *commit;
 
-		if (!has_object_file_with_flags(&ref->old_oid,
+		commit = lookup_commit_in_graph(the_repository, &ref->old_oid);
+		if (!commit) {
+			struct object *o;
+
+			if (!has_object_file_with_flags(&ref->old_oid,
 						OBJECT_INFO_QUICK |
-							OBJECT_INFO_SKIP_FETCH_OBJECT))
-			continue;
-		o = parse_object(the_repository, &ref->old_oid);
-		if (!o)
-			continue;
+						OBJECT_INFO_SKIP_FETCH_OBJECT))
+				continue;
+			o = parse_object(the_repository, &ref->old_oid);
+			if (!o || o->type != OBJ_COMMIT)
+				continue;
+
+			commit = (struct commit *)o;
+		}
 
 		/*
 		 * We already have it -- which may mean that we were
 		 * in sync with the other side at some time after
 		 * that (it is OK if we guess wrong here).
 		 */
-		if (o->type == OBJ_COMMIT) {
-			struct commit *commit = (struct commit *)o;
-			if (!cutoff || cutoff < commit->date)
-				cutoff = commit->date;
-		}
+		if (!cutoff || cutoff < commit->date)
+			cutoff = commit->date;
 	}
 	trace2_region_leave("fetch-pack", "parse_remote_refs_and_find_cutoff", NULL);
 
@@ -945,6 +961,8 @@ static int get_pack(struct fetch_pack_args *args,
 			strvec_push(index_pack_args, cmd.args.v[i]);
 	}
 
+	sigchain_push(SIGPIPE, SIG_IGN);
+
 	cmd.in = demux.out;
 	cmd.git_cmd = 1;
 	if (start_command(&cmd))
@@ -974,6 +992,8 @@ static int get_pack(struct fetch_pack_args *args,
 		die(_("%s failed"), cmd_name);
 	if (use_sideband && finish_async(&demux))
 		die(_("error in sideband demultiplexer"));
+
+	sigchain_pop(SIGPIPE);
 
 	/*
 	 * Now that index-pack has succeeded, write the promisor file using the
@@ -1399,9 +1419,17 @@ static int process_ack(struct fetch_negotiator *negotiator,
 	 * otherwise.
 	 */
 	if (*received_ready && reader->status != PACKET_READ_DELIM)
-		die(_("expected packfile to be sent after 'ready'"));
+		/*
+		 * TRANSLATORS: The parameter will be 'ready', a protocol
+		 * keyword.
+		 */
+		die(_("expected packfile to be sent after '%s'"), "ready");
 	if (!*received_ready && reader->status != PACKET_READ_FLUSH)
-		die(_("expected no other sections to be sent after no 'ready'"));
+		/*
+		 * TRANSLATORS: The parameter will be 'ready', a protocol
+		 * keyword.
+		 */
+		die(_("expected no other sections to be sent after no '%s'"), "ready");
 
 	return 0;
 }
@@ -1642,8 +1670,13 @@ static struct ref *do_fetch_pack_v2(struct fetch_pack_args *args,
 				receive_wanted_refs(&reader, sought, nr_sought);
 
 			/* get the pack(s) */
+			if (git_env_bool("GIT_TRACE_REDACT", 1))
+				reader.options |= PACKET_READ_REDACT_URI_PATH;
 			if (process_section_header(&reader, "packfile-uris", 1))
 				receive_packfile_uris(&reader, &packfile_uris);
+			/* We don't expect more URIs. Reset to avoid expensive URI check. */
+			reader.options &= ~PACKET_READ_REDACT_URI_PATH;
+
 			process_section_header(&reader, "packfile", 0);
 
 			/*
@@ -1906,16 +1939,15 @@ static void update_shallow(struct fetch_pack_args *args,
 	oid_array_clear(&ref);
 }
 
-static int iterate_ref_map(void *cb_data, struct object_id *oid)
+static const struct object_id *iterate_ref_map(void *cb_data)
 {
 	struct ref **rm = cb_data;
 	struct ref *ref = *rm;
 
 	if (!ref)
-		return -1; /* end of the list */
+		return NULL;
 	*rm = ref->next;
-	oidcpy(oid, &ref->old_oid);
-	return 0;
+	return &ref->old_oid;
 }
 
 struct ref *fetch_pack(struct fetch_pack_args *args,

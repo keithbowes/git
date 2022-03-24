@@ -205,8 +205,18 @@ test_expect_success 'submodule update should fail due to local changes' '
 	 (cd submodule &&
 	  compare_head
 	 ) &&
-	 test_must_fail git submodule update submodule
-	)
+	 test_must_fail git submodule update submodule 2>../actual.raw
+	) &&
+	sed "s/^> //" >expect <<-\EOF &&
+	> error: Your local changes to the following files would be overwritten by checkout:
+	> 	file
+	> Please commit your changes or stash them before you switch branches.
+	> Aborting
+	> fatal: Unable to checkout OID in submodule path '\''submodule'\''
+	EOF
+	sed -e "s/checkout $SQ[^$SQ]*$SQ/checkout OID/" <actual.raw >actual &&
+	test_cmp expect actual
+
 '
 test_expect_success 'submodule update should throw away changes with --force ' '
 	(cd super &&
@@ -448,7 +458,7 @@ test_expect_success 'fsck detects command in .gitmodules' '
 '
 
 cat << EOF >expect
-Execution of 'false $submodulesha1' failed in submodule path 'submodule'
+fatal: Execution of 'false $submodulesha1' failed in submodule path 'submodule'
 EOF
 
 test_expect_success 'submodule update - command in .git/config catches failure' '
@@ -465,7 +475,7 @@ test_expect_success 'submodule update - command in .git/config catches failure' 
 '
 
 cat << EOF >expect
-Execution of 'false $submodulesha1' failed in submodule path '../submodule'
+fatal: Execution of 'false $submodulesha1' failed in submodule path '../submodule'
 EOF
 
 test_expect_success 'submodule update - command in .git/config catches failure -- subdirectory' '
@@ -484,7 +494,7 @@ test_expect_success 'submodule update - command in .git/config catches failure -
 
 test_expect_success 'submodule update - command run for initial population of submodule' '
 	cat >expect <<-EOF &&
-	Execution of '\''false $submodulesha1'\'' failed in submodule path '\''submodule'\''
+	fatal: Execution of '\''false $submodulesha1'\'' failed in submodule path '\''submodule'\''
 	EOF
 	rm -rf super/submodule &&
 	test_must_fail git -C super submodule update 2>actual &&
@@ -493,8 +503,8 @@ test_expect_success 'submodule update - command run for initial population of su
 '
 
 cat << EOF >expect
-Execution of 'false $submodulesha1' failed in submodule path '../super/submodule'
-Failed to recurse into submodule path '../super'
+fatal: Execution of 'false $submodulesha1' failed in submodule path '../super/submodule'
+fatal: Failed to recurse into submodule path '../super'
 EOF
 
 test_expect_success 'recursive submodule update - command in .git/config catches failure -- subdirectory' '
@@ -1059,6 +1069,18 @@ test_expect_success 'submodule update --quiet passes quietness to fetch with a s
 	 test_file_not_empty out &&
 	 test_file_not_empty err
 	)
+'
+
+test_expect_success 'submodule update --filter requires --init' '
+	test_expect_code 129 git -C super submodule update --filter blob:none
+'
+
+test_expect_success 'submodule update --filter sets partial clone settings' '
+	test_when_finished "rm -rf super-filter" &&
+	git clone cloned super-filter &&
+	git -C super-filter submodule update --init --filter blob:none &&
+	test_cmp_config -C super-filter/submodule true remote.origin.promisor &&
+	test_cmp_config -C super-filter/submodule blob:none remote.origin.partialclonefilter
 '
 
 test_done

@@ -95,9 +95,7 @@ static int create_file(const char *path)
 {
 	int fd;
 	path = get_mtime_path(path);
-	fd = open(path, O_CREAT | O_RDWR, 0644);
-	if (fd < 0)
-		die_errno(_("failed to create file %s"), path);
+	fd = xopen(path, O_CREAT | O_RDWR, 0644);
 	return fd;
 }
 
@@ -608,7 +606,7 @@ static struct cache_entry *read_one_ent(const char *which,
 			error("%s: not in %s branch.", path, which);
 		return NULL;
 	}
-	if (mode == S_IFDIR) {
+	if (!the_index.sparse_index && mode == S_IFDIR) {
 		if (which)
 			error("%s: not a blob in %s branch.", path, which);
 		return NULL;
@@ -745,8 +743,6 @@ static int do_reupdate(int ac, const char **av,
 		 */
 		has_head = 0;
  redo:
-	/* TODO: audit for interaction with sparse-index. */
-	ensure_full_index(&the_index);
 	for (pos = 0; pos < active_nr; pos++) {
 		const struct cache_entry *ce = active_cache[pos];
 		struct cache_entry *old = NULL;
@@ -763,6 +759,16 @@ static int do_reupdate(int ac, const char **av,
 			discard_cache_entry(old);
 			continue; /* unchanged */
 		}
+
+		/* At this point, we know the contents of the sparse directory are
+		 * modified with respect to HEAD, so we expand the index and restart
+		 * to process each path individually
+		 */
+		if (S_ISSPARSEDIR(ce->ce_mode)) {
+			ensure_full_index(&the_index);
+			goto redo;
+		}
+
 		/* Be careful.  The working tree may not have the
 		 * path anymore, in which case, under 'allow_remove',
 		 * or worse yet 'allow_replace', active_nr may decrease.
@@ -789,6 +795,17 @@ static int refresh(struct refresh_params *o, unsigned int flag)
 	setup_work_tree();
 	read_cache();
 	*o->has_errors |= refresh_cache(o->flags | flag);
+	if (has_racy_timestamp(&the_index)) {
+		/*
+		 * Even if nothing else has changed, updating the file
+		 * increases the chance that racy timestamps become
+		 * non-racy, helping future run-time performance.
+		 * We do that even in case of "errors" returned by
+		 * refresh_cache() as these are no actual errors.
+		 * cmd_status() does the same.
+		 */
+		active_cache_changed |= SOMETHING_CHANGED;
+	}
 	return 0;
 }
 
@@ -1078,6 +1095,9 @@ int cmd_update_index(int argc, const char **argv, const char *prefix)
 		usage_with_options(update_index_usage, options);
 
 	git_config(git_default_config, NULL);
+
+	prepare_repo_settings(r);
+	the_repository->settings.command_requires_full_index = 0;
 
 	/* we will diagnose later if it turns out that we need to update it */
 	newfd = hold_locked_index(&lock_file, 0);
